@@ -4,7 +4,7 @@ import time
 import random
 import os
 
-#Constents
+# --- CONSTANTS ---
 CAR_WIDTH = 34    
 CAR_LENGTH = 64   
 GAP_SIZE = 110    
@@ -14,15 +14,18 @@ class AssetManager:
     def __init__(self):
         self.images = {}
         self.car_images = [] 
+        # Fix: Use absolute path to ensure assets are found
+        self.base_path = os.path.dirname(os.path.abspath(__file__))
         self.load_assets()
 
     def load_assets(self):
-        if not os.path.exists("assets"):
-            os.makedirs("assets")
-            print("Created 'assets' folder.")
+        asset_dir = os.path.join(self.base_path, "assets")
+        if not os.path.exists(asset_dir):
+            os.makedirs(asset_dir)
+            print(f"Created 'assets' folder at {asset_dir}")
 
         for i in range(1, 8): 
-            filename = f"assets/car{i}.png"
+            filename = os.path.join(asset_dir, f"car{i}.png")
             try:
                 raw_car = pygame.image.load(filename)
                 raw_car = pygame.transform.scale(raw_car, (CAR_WIDTH, CAR_LENGTH))
@@ -30,31 +33,19 @@ class AssetManager:
             except:
                 self.car_images.append(None)
 
-        try:
-            grass = pygame.image.load("assets/grass.jpg")
-            grass = pygame.transform.scale(grass, (800, 600))
-            self.images['grass'] = grass
-        except:
-            self.images['grass'] = None
+        self.load_single_image(asset_dir, 'grass', "grass.png", (800, 600))
+        self.load_single_image(asset_dir, 'road', "road.png", (800, 600))
+        self.load_single_image(asset_dir, 'building', "building.png")
+        self.load_single_image(asset_dir, 'traffic_light', "traffic_light.png", (40, 100))
 
+    def load_single_image(self, folder, key, filename, scale=None):
+        path = os.path.join(folder, filename)
         try:
-            road = pygame.image.load("assets/road.jpg")
-            self.images['road'] = road
+            img = pygame.image.load(path)
+            if scale: img = pygame.transform.scale(img, scale)
+            self.images[key] = img
         except:
-            self.images['road'] = None
-
-        try:
-            building = pygame.image.load("assets/building.png")
-            self.images['building'] = building
-        except:
-            self.images['building'] = None
-
-        try:
-            tl = pygame.image.load("assets/traffic_light.png")
-            tl = pygame.transform.scale(tl, (40, 100)) 
-            self.images['traffic_light'] = tl
-        except:
-            self.images['traffic_light'] = None
+            self.images[key] = None
 
     def get_car_image(self, direction, car_index):
         if not self.car_images or car_index >= len(self.car_images) or self.car_images[car_index] is None:
@@ -89,9 +80,11 @@ class CarEntity:
         self.direction = direction
         self.sprite_index = sprite_index
         self.color = (random.randint(50,255), random.randint(50,255), random.randint(50,255))
+        
         self.speed = 0
         self.max_speed = 4.0    
-        self.accel = 0.2        
+        # --- SMOOTHNESS UPDATE: Agile Cars ---
+        self.accel = 0.4        
         self.decel = 0.2        
         self.state = "approaching" 
         self.stop_pos_base = stop_pos 
@@ -103,7 +96,7 @@ class CarEntity:
             self.wait_time += 1
         
         if self.state == "leaving":
-            self.speed = min(self.speed + 0.2, 6.0) 
+            self.speed = min(self.speed + 0.3, 6.0) 
             self.is_braking = False
             self.move_by_speed() 
             return
@@ -121,12 +114,14 @@ class CarEntity:
             target = self.stop_pos_base - (car_index_in_queue * gap_spacing)
             dist = target - self.x
 
-        if dist > 30: 
+        if dist > 40: 
             self.speed = min(self.speed + self.accel, self.max_speed)
             self.is_braking = False
             self.state = "approaching"
         elif dist > 1: 
-            self.speed = max(0.0, dist * 0.15) 
+            # Smooth braking that doesn't "jump" speed
+            target_speed = max(0.0, dist * 0.3)
+            self.speed = min(self.max_speed, target_speed) 
             self.is_braking = True 
         else: 
             self.speed = 0
@@ -150,6 +145,7 @@ class TrafficEnv:
         self.steps_in_current_phase = 0
         self.min_duration = 40  
         self.max_green_duration = 60 
+        self.prev_wait = 0
         self.reset()
 
     @property
@@ -199,7 +195,7 @@ class TrafficEnv:
 
         self._random_arrivals()
 
-        #reward system
+        # reward system (UNCHANGED)
         total_queue = sum(self.state)          
         queue_penalty = - (total_queue / 20.0)   
 
@@ -211,15 +207,12 @@ class TrafficEnv:
             self.prev_wait = curr_wait
 
         flow_bonus = 0.2 if self.state[self.current_green] > 0 else 0.0
-
         change_penalty = -0.2 if action != self.current_green else 0.0
 
         reward = queue_penalty + wait_penalty + flow_bonus + change_penalty
-
         reward = max(-1.0, min(1.0, reward))
 
         return self._get_simplified_state(), reward
-
 
     def _random_arrivals(self):
         for i in range(4):
@@ -346,8 +339,18 @@ class TrafficVisualizer:
                     continue 
 
                 first_car = queue[0]
-                if current_time - self.last_release_time > 0.8:
-                    if first_car.state == "waiting" or first_car.is_braking:
+                
+                # --- SMOOTHNESS UPDATE: Extended Distance & Faster Timer ---
+                dist_to_stop = 0
+                if first_car.direction == 'down': dist_to_stop = first_car.stop_pos_base - first_car.y
+                elif first_car.direction == 'up': dist_to_stop = first_car.y - first_car.stop_pos_base
+                elif first_car.direction == 'left': dist_to_stop = first_car.x - first_car.stop_pos_base
+                elif first_car.direction == 'right': dist_to_stop = first_car.stop_pos_base - first_car.x
+                
+                # Update: Reduced delay from 0.8 to 0.4 seconds for faster release
+                # Update: Increased detection distance from 60 to 100 pixels
+                if current_time - self.last_release_time > 0.4:
+                    if dist_to_stop < 100 or first_car.state == "waiting":
                         car = queue.pop(0)
                         car.state = "leaving"
                         self.leaving_cars.append(car)
@@ -494,6 +497,7 @@ class TrafficVisualizer:
             spacing = 22 
             start_y = box_top + 15 
             if state == 'red': pygame.draw.circle(self.screen, (255,0,0), (center_x, start_y), 8)
+            # Yellow logic is gone.
             if state == 'green': pygame.draw.circle(self.screen, (0,255,0), (center_x, start_y + spacing*2), 8)
         else:
             box_x, box_y = x - 14, y - 100
@@ -501,14 +505,14 @@ class TrafficVisualizer:
             r = (255, 50, 50) if state == 'red' else (70, 0, 0)
             g = (50, 255, 50) if state == 'green' else (0, 70, 0)
             
-            #red
+            # Red
             pygame.draw.circle(self.screen, r, (box_x + 14, box_y + 12), 7)
             if r[0] > 100:
                  s = pygame.Surface((20, 20), pygame.SRCALPHA)
                  pygame.draw.circle(s, (*r, 50), (10, 10), 9)
                  self.screen.blit(s, (box_x + 4, box_y + 12 - 9))
             
-            #green
+            # Green (Position: Bottom)
             py = box_y + 12 + 40 
             pygame.draw.circle(self.screen, g, (box_x + 14, py), 7)
             if g[1] > 100:
